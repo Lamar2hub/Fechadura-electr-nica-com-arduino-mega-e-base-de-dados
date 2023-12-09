@@ -1,0 +1,435 @@
+/*»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»
+»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»
+»»»»»»»»»»»»
+UNIVERSIDADE EDUARDO MONDLANE
+FACULDADE DE ENGENHARIA
+DEPARTAMENTO DE ELECTROTECNIA
+ENGENHARIA ELECTRÓNICA
+PROJECTO DO CURSO
+Desenvolvimento de um sistema de controle de segurança com BD para registro de 
+usuários e envio de notificação de incidentes.
+Autor: Macome, Laércio Clementina Marcelino Macome
+Supervisor: Mestre. Joaquim. Paulo. branco
+»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»
+»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»»
+»»»»»»»»»»*/
+#include <LiquidCrystal_I2C.h> //Incluindo a biblioteca que nos vai facilitar 
+o uso do display.
+#include <Wire.h>
+#include <Keypad.h> //Incluindo a biblioteca que nos vai facilitar o uso do 
+keypad.
+byte pinolinhas[] = { 30, 31, 32, 33 }; //Definindo as portas em que ligamos 
+as linhas do teclado.
+byte pinocolunas[] = { 34, 35, 36, 37 }; // Definindo as portas em que 
+ligamos as colunas do teclado.
+char teclas[4][4] = { { '1', '2', '3', 'A' }, // Esta matris tem o mapa das 
+teclas, informa a biblioteca qual caracter corresponde a xy(linha e coluna) 
+pressionada.
+{ '4', '5', '6', 'B' },
+{ '7', '8', '9', 'C' },
+{ '*', '0', '#', 'D' } };
+Keypad teclado = Keypad(makeKeymap(teclas), pinolinhas, pinocolunas, 4, 
+4); //instanciando um objecto da classe Keypad com nome teclado
+// aqui termina a inicialização do keypad.
+//----------------------------------------------------------------------------
+---------------------------
+LiquidCrystal_I2C lcd(0x27, 16, 2); // instanciado um objecto da classe 
+LiquidCrystal_I2C com nome lcd
+// aqui termina a inicializacao do display lcd.
+//----------------------------------------------------------------------------
+// A Senha
+char senhaDigitada[7] = "000000";
+char senhaBD[6];
+char nome[18];
+//----------------------------------------------------------------------------
+//Banco de dados
+#include <Ethernet.h>
+#include <MySQL_Connection.h>
+#include <MySQL_Cursor.h>
+byte mac_addr[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
+IPAddress ip(192, 168, 137, 2); // IP da Ethernet Shield
+IPAddress server_addr(192, 168, 137, 1); // IP do MySQL
+char user[] = "macome"; // username de login no MySQL
+char password[] = "Parmalate1"; // password do usuário no MySQL
+EthernetClient client;
+MySQL_Connection conn((Client*)&client);
+MySQL_Cursor* cur_mem = new MySQL_Cursor(&conn);
+//----------------------------------------------------------------------------
+//Querys(instrucoes) para manipular a BD
+char query_1[100] = "SELECT NOME, PASSWORD FROM ARDUINO.USUARIOS WHERE 
+PASSWORD = '%s';";
+//char query_2 [180] = "INSERT INTO ARDUINO.HISTORICO (nome, datahora) VALUES 
+('%s', now());";
+char query[200] = "";
+void (*softreset)() = 0;
+//----------------------------------------------------------------------------
+//Definindo os pinos para a trava, o buzzer e o LED
+#define trava 38
+#define buzzer 6
+#define LED 7
+#define botaoD 39
+//----------------------------------------------------------------------------
+int estadoporta = 1; //zero = aberta e um = fechada;
+int estadobotaoD;
+int contachances = 0;
+unsigned long tempoInicial;
+unsigned long tempoAnterior = 0;
+unsigned long intervalo = 1000;
+unsigned long tempoDecorrido;
+bool temSMS = false;
+String telefoneSMS;
+String dataHoraSMS;
+String mensagemSMS;
+String comandoGSM = "";
+void setup() {
+Serial.begin(115200);
+Serial1.begin(115200);
+pinMode(trava, OUTPUT);
+pinMode(buzzer, OUTPUT);
+pinMode(LED, OUTPUT);
+pinMode(botaoD, INPUT);
+tempoInicial = millis();
+lcd.init();
+lcd.backlight();
+lcd.blink();
+conectar();
+enviarcomando("AT+CMGF=1");
+enviarcomando("AT+CNMI=1,2,0,0,0");
+lcd.print("SisdeCondeAcesso");
+}
+void loop() {
+if (portaFechada()) {
+estadobotaoD = botaoApertado();
+if (estadobotaoD == 1) {
+estadoporta = 0;
+sair();
+}
+char tecla_pressionada = teclado.getKey();
+if (tecla_pressionada == 'A') {
+modoAbrir();
+portaFechada();
+}
+}
+leGSM();
+if (temSMS) {
+//Serial.println("Chegou Mensagem!!");
+//Serial.println();
+//Serial.print("Remetente: ");
+//Serial.println(telefoneSMS);
+//Serial.println();
+//Serial.print("Data/Hora: ");
+//Serial.println(dataHoraSMS);
+//Serial.println();
+//Serial.println("Mensagem:");
+//Serial.println(mensagemSMS);
+//Serial.println();
+mensagemSMS.trim();
+if (mensagemSMS == "estadoporta") {
+Serial.println("Enviando estado da porta.");
+if (estadoporta == 1) {
+enviaAlerta("+258824096696", "A porta esta fechada");
+}
+if (estadoporta == 0) {
+enviaAlerta("+258824096696", "A porta esta Aberta");
+}
+}
+temSMS = false;
+}
+}
+//----------------------------------------------------------------------------
+//funcoes que auxiliam o programa
+void sair() {
+digitalWrite(trava, HIGH);
+delay(3000);
+digitalWrite(trava, LOW);
+mensagemaosair();
+}
+void mensagemaosair() {
+lcd.clear();
+lcd.print("Porta Aberta");
+lcd.setCursor(0, 1);
+lcd.print("Feche a porta");
+fecharaosair();
+}
+void fecharaosair() {
+char tecla1;
+int x = 0;
+while (tecla1 != 'C') {
+//tempoInicial = millis();
+tempoDecorrido = millis() - tempoInicial;
+//Serial.println(tempoDecorrido);
+if (tempoDecorrido - tempoAnterior >= intervalo) {
+tempoAnterior = tempoDecorrido;
+digitalWrite(LED, !digitalRead(LED));
+}
+tecla1 = teclado.getKey();
+if (tecla1 == 'C') {
+digitalWrite(buzzer, LOW);
+tempoInicial = millis();
+tempoAnterior = 0;
+estadoporta = 1;
+infoFechada();
+portaFechada();
+return;
+}
+if (tempoDecorrido >= 30000 && !portaFechada()) {
+digitalWrite(buzzer, HIGH);
+delay(500);
+digitalWrite(buzzer, LOW);
+}
+}
+}
+bool portaFechada() {
+if (estadoporta == 1) {
+//infoFechada();
+return true;
+} else {
+return false;
+}
+}
+void infoFechada() {
+lcd.clear();
+lcd.print("PortaFechada");
+delay(2000);
+lcd.clear();
+lcd.print("SisdeCondeAcesso");
+return;
+}
+byte botaoApertado() {
+byte botaoApertado;
+byte estado = 0;
+botaoApertado = digitalRead(botaoD);
+if (botaoApertado == HIGH) {
+estado = 1;
+}
+return estado;
+}
+//----------------------------------------------------------------------------
+void modoAbrir() {
+lcd.clear();
+introSenha();
+}
+void introSenha() {
+char tecla;
+int cont = 0;
+lcd.print("Palavra-passe:");
+lcd.setCursor(0, 1);
+//memset(senhaDigitada, 0, sizeof(senhaDigitada));
+while (cont < 6) {
+tecla = teclado.getKey();
+if (tecla != NO_KEY && tecla != '#') {
+lcd.print('*');
+piscaledebuzzer(1, 100);
+senhaDigitada[cont] = tecla;
+cont++;
+} else if (tecla == '#') {
+//Serial.println(get_free_memory());
+//Serial.println(senhaDigitada);
+break;
+}
+}
+senhaDigitada[cont] = '\0';
+if (consultadb()) {
+comparaSenha();
+} else {
+//Serial.println("Senha incorreta");
+lcd.clear();
+lcd.print("Senha incorreta");
+piscaledebuzzer(5, 20);
+delay(2000);
+lcd.clear();
+lcd.print("SisdeCondeAcesso");
+contachances++;
+//Serial.println(contachances);
+if (contachances == 3) {
+enviarcomando("AT+CMGF=1");
+enviaAlerta("+258824096696", "SisdeCondeAcesso: Ação suspeita, alguém 
+excedeu o limite de tentativas.");
+delay(5000);
+contachances = 0;
+}
+}
+//delete [] senhaDigitada;
+// free(query_1);
+free(senhaDigitada[cont]);
+}
+bool consultadb() {
+sprintf(query, query_1, senhaDigitada);
+//Serial.println(query);
+if (cur_mem->execute(query)) {
+column_names* columns = cur_mem->get_columns();
+if (columns) {
+row_values* row = cur_mem->get_next_row();
+if (row) {
+strcpy(nome, row->values[0]);
+strcpy(senhaBD, row->values[1]);
+//free(query_1);
+//free(query);
+//free(cur_mem);
+//Serial.println(nome);
+//Serial.println(senhaBD);
+//free(row);
+//Serial.println(get_free_memory());
+return true;
+}
+}
+//delete cur_mem;
+//free(columns);
+}
+//free(query_1);
+//free(cur_mem);
+return false;
+}
+void comparaSenha() {
+if (strcasecmp(senhaBD, senhaDigitada) == 0) {
+contachances = 0;
+lcd.clear();
+acessopermitido();
+historico();
+} //else {
+//lcd.clear();
+//lcd.print("Senha incorreta");
+//piscaledebuzzer(5, 20);
+//Serial.println("Erro: Senha incorreta");
+//contachances ++;
+//Serial.println(contachances);
+//if(contachances == 3){
+//enviarcomando("AT+CMGF=1");
+//enviaAlerta("+258824096696", "Fulano esqueceu-se de fechar a porta");
+//delay(5000);
+//contachances = 0;
+//}
+//}
+memset(senhaDigitada, 0, sizeof(senhaDigitada));
+//memset(nome, 0, sizeof(nome));
+//memset(senhaBD, 0, sizeof(senhaBD));
+estadoporta = 1;
+//delete cur_mem;
+}
+bool conectar() {
+Ethernet.begin(mac_addr, ip);
+if (conn.connect(server_addr, 3306, user, password)) {
+delay(1000);
+lcd.clear();
+lcd.print("Conectado.");
+digitalWrite(LED, HIGH);
+delay(100);
+lcd.clear();
+return true;
+} else {
+lcd.print("Erro: Falha na conexão.");
+//Serial.println("Erro: Falha na conexão com o banco de dados");
+return false;
+}
+}
+void historico() {
+MySQL_Cursor* cur = new MySQL_Cursor(&conn);
+char query_2[180] = "INSERT INTO ARDUINO.HISTORICO (nome, datahora) VALUES 
+('%s', now());\n";
+char query_3[180] = "";
+sprintf(query_3, query_2, nome);
+//Serial.print(query_3);
+cur->execute(query_3);
+//free(query_1);
+//free(query);
+//free(cur_mem);
+//delete cur;
+delete[] nome;
+delete[] senhaBD;
+delete[] senhaDigitada;
+delay(500);
+softreset();
+}
+void acessopermitido() {
+digitalWrite(buzzer, HIGH);
+lcd.print("Bem-vindo");
+lcd.setCursor(0, 1);
+lcd.print(nome);
+digitalWrite(trava, HIGH);
+delay(500);
+digitalWrite(buzzer, LOW);
+digitalWrite(trava, LOW);
+}
+void piscaledebuzzer(int pisca, int tempo) {
+for (int n = 1; n <= pisca; n++) {
+digitalWrite(LED, LOW);
+digitalWrite(buzzer, HIGH);
+delay(tempo);
+digitalWrite(LED, HIGH);
+digitalWrite(buzzer, LOW);
+delay(tempo * 2);
+}
+}
+//-----------------------------------------------------------------
+//envio de notificacoes
+void enviarcomando(const char* comando) {
+Serial.print("Comando enviado: ");
+Serial1.println(comando);
+delay(500);
+Serial.println("Resposta do SIM800L: ");
+while (Serial1.available()) {
+Serial.write(Serial1.read());
+}
+}
+void enviaAlerta(const char* MSISDN, const char* mensagem) {
+Serial.println("Enviando alerta...");
+String comando = "AT+CMGS=\"" + String(MSISDN) + "\"";
+enviarcomando(comando.c_str());
+delay(1000);
+Serial1.print(mensagem);
+delay(1000);
+Serial1.write(26);
+Serial.println();
+delay(5000);
+}
+void leGSM() {
+static String textoRec = "";
+static unsigned long delay1 = 0;
+static int count = 0;
+static unsigned char buffer[64];
+if (Serial1.available()) {
+while (Serial1.available()) {
+buffer[count++] = Serial1.read();
+if (count == 64) break;
+}
+textoRec += (char*)buffer;
+delay1 = millis();
+for (int i = 0; i < count; i++) {
+buffer[i] = NULL;
+}
+count = 0;
+}
+if (((millis() - delay1) > 100) && textoRec != "") {
+if (textoRec.substring(2, 7) == "+CMT:") {
+temSMS = true;
+}
+if (temSMS) {
+telefoneSMS = "";
+dataHoraSMS = "";
+mensagemSMS = "";
+byte linha = 0;
+byte aspas = 0;
+for (int nL = 1; nL < textoRec.length(); nL++) {
+if (textoRec.charAt(nL) == '"') {
+aspas++;
+continue;
+}
+if ((linha == 1) && (aspas == 1)) {
+telefoneSMS += textoRec.charAt(nL);
+}
+if ((linha == 1) && (aspas == 5)) {
+dataHoraSMS += textoRec.charAt(nL);
+}
+if (linha == 2) {
+mensagemSMS += textoRec.charAt(nL);
+}
+if (textoRec.substring(nL - 1, nL + 1) == "\r\n") {
+linha++;
+}
+}
+} else {
+comandoGSM = textoRec;
+}
+textoRec = "";
+}
+}
